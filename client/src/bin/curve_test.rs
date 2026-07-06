@@ -24,7 +24,7 @@ const CHUNK_DIV: u128 = 32;
 const E18: u128 = 1_000_000_000_000_000_000;
 
 const CFG: LaunchCfg = LaunchCfg {
-    start_price_fp: 10_000 * FP, // 0.00001 SOL / token
+    start_price_fp: 1_000_000_000 * FP, // 1 SOL / token
     double_vol: 25 * SOL,        // schedule: 2x per 25 SOL (governor tempers it)
     buy_fee_creator_bps: 0,      // buys: nothing to creator
     buy_fee_floor_bps: 300,      // buys: 3% straight into the floor
@@ -207,6 +207,21 @@ async fn main() {
     // --- 2) Re-initialize rejected ------------------------------------------
     let reinit = send(rpc, &[curve::initialize(&program, &creator.pubkey(), &mint, &CFG)], &creator, &[&creator]).await;
     check!("re-Initialize rejected", reinit.is_err());
+
+    // --- 2b) PLATFORM RULE: backing must be 50%+, governor is mandatory -------
+    for (bps, ok, name) in [
+        (4000u16, false, "PLATFORM: backing 40% rejected (< 50% floor)"),
+        (0u16, false, "PLATFORM: ungoverned (0) rejected"),
+        (6000u16, true, "PLATFORM: backing 60% accepted"),
+    ] {
+        let mk = Keypair::new();
+        let m = mk.pubkey();
+        send(rpc, &curve::create_mint_ixs(&program, &payer.pubkey(), &m, mint_rent), &payer, &[&payer, &mk]).await.expect("mint");
+        let mut cfg = CFG;
+        cfg.min_backing_bps = bps;
+        let r = send(rpc, &[curve::initialize(&program, &creator.pubkey(), &m, &cfg)], &creator, &[&creator]).await;
+        check!(name, r.is_ok() == ok);
+    }
 
     // --- 3) First buy: exact out, 3% to floor, creator gets NOTHING on buys ---
     send(rpc, &[curve::create_ata_ix(&buyer.pubkey(), &buyer.pubkey(), &mint)], &buyer, &[&buyer]).await.expect("buyer ata");

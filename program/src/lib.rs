@@ -12,7 +12,8 @@
 //!     NAV / ratio, chunk-by-chunk with running NAV. This bounds the
 //!     price-vs-floor gap forever, so the worst possible instant round trip
 //!     is fees + gap (with 3%/6% fees and 93.5% backing: ~-14.8% all-in).
-//!     0 disables the governor (pure schedule — degen mode).
+//!     PLATFORM RULE: min_backing_bps must be 5000..=9900 (50% to 99%), so
+//!     the governor is always on and no launch can drop below 50% backing.
 //!
 //! Invariants (enforced by construction, proven in curve_test):
 //!   * curve price is monotone nondecreasing; NAV is monotone nondecreasing
@@ -67,7 +68,7 @@ const MAX_BUY_DOUBLINGS: u128 = 8;
 pub const MAX_CREATOR_FEE_BPS: u16 = 500; // 5% per side
 pub const MAX_BUY_FLOOR_BPS: u16 = 1_000; // 10%
 pub const MAX_SELL_FLOOR_BPS: u16 = 2_000; // 20%
-pub const MIN_BACKING_FLOOR_BPS: u16 = 1_000; // if governed, at least 10% backing
+pub const MIN_BACKING_FLOOR_BPS: u16 = 5_000; // PLATFORM RULE: every launch must keep backing at 50% or above (no ungoverned/degen launches)
 pub const MAX_BACKING_BPS: u16 = 9_900; // and at most 99% (100% = zero speed)
 pub const MIN_DOUBLE_VOL: u64 = 1_000_000_000; // 1 SOL per 2x minimum
 pub const MAX_DOUBLE_VOL: u64 = 10_000_000_000_000; // 10k SOL per 2x maximum
@@ -112,7 +113,7 @@ pub struct Curve {
     pub sell_fee_creator_bps: u16,
     /// Sell fee that stays in the vault (bps of gross) — sells raise NAV.
     pub sell_fee_floor_bps: u16,
-    /// Governor: price <= NAV * 10000 / min_backing_bps. 0 = ungoverned.
+    /// Governor: price <= NAV * 10000 / min_backing_bps. Always 5000..=9900.
     pub min_backing_bps: u16,
     /// Cumulative net buy lamports (stats).
     pub cum_vol: u128,
@@ -327,8 +328,7 @@ fn initialize(
         || sell_fee_creator_bps > MAX_CREATOR_FEE_BPS
         || buy_fee_floor_bps > MAX_BUY_FLOOR_BPS
         || sell_fee_floor_bps > MAX_SELL_FLOOR_BPS
-        || (min_backing_bps != 0
-            && !(MIN_BACKING_FLOOR_BPS..=MAX_BACKING_BPS).contains(&min_backing_bps))
+        || !(MIN_BACKING_FLOOR_BPS..=MAX_BACKING_BPS).contains(&min_backing_bps)
     {
         return Err(err(E_BAD_PARAMS));
     }
