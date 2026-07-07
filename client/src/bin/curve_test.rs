@@ -210,6 +210,9 @@ async fn main() {
     let curve_rent = rpc.min_balance(curve::CURVE_SIZE).await;
     let ctx = Ctx { rpc, program, mint, curve_rent };
     let rpc = &ctx.rpc;
+    // The 1% buy fee is hardcoded in the program to the platform fee wallet; the
+    // buy_creator arg to Initialize is ignored, and Buy requires this exact wallet.
+    let platform = Pubkey::from_str("Bj6kYwqS7Le5SkwYepMTDUpDZNgmYTfXW9FPAvRq7vsY").unwrap();
     send(rpc, &curve::create_mint_ixs(&program, &payer.pubkey(), &mint, mint_rent), &payer, &[&payer, &mint_kp])
         .await
         .expect("create mint");
@@ -221,7 +224,7 @@ async fn main() {
             check!("Initialize creates curve PDA", c.is_some());
             if let Some(c) = c {
                 check!("curve params correct",
-                    c.mint == mint && c.buy_creator == creator.pubkey() && c.sell_creator == creator.pubkey()
+                    c.mint == mint && c.buy_creator == platform && c.sell_creator == creator.pubkey()
                         && c.price_fp == CFG.start_price_fp && c.double_vol == CFG.double_vol
                         && c.buy_fee_creator_bps == 100 && c.buy_fee_floor_bps == 200
                         && c.sell_fee_creator_bps == 100 && c.sell_fee_floor_bps == 500
@@ -261,14 +264,17 @@ async fn main() {
         send(rpc, &curve::create_mint_ixs(&program, &payer.pubkey(), &m2, mint_rent), &payer, &[&payer, &mk]).await.expect("split mint");
         send(rpc, &[curve::initialize(&program, &creator.pubkey(), &bc.pubkey(), &sc.pubkey(), &m2, &CFG)], &creator, &[&creator]).await.expect("split init");
         send(rpc, &[curve::create_ata_ix(&sniper.pubkey(), &sniper.pubkey(), &m2)], sniper, &[sniper]).await.expect("split ata");
-        // buy: 1% must land on buy_creator (bc), NOT sell_creator (sc)
-        send(rpc, &[curve::buy(&program, &sniper.pubkey(), &m2, &bc.pubkey(), SOL, 0)], sniper, &[sniper]).await.expect("split buy");
-        check!("SPLIT: buy 1% went to buy_creator", ctx.rpc.balance(&bc.pubkey()).await == SOL / 100);
+        // buy: 1% must land on the hardcoded PLATFORM wallet, regardless of the
+        // buy_creator (bc) passed at init; sell_creator (sc) gets nothing on a buy.
+        let plat0 = ctx.rpc.balance(&platform).await;
+        send(rpc, &[curve::buy(&program, &sniper.pubkey(), &m2, &platform, SOL, 0)], sniper, &[sniper]).await.expect("split buy");
+        check!("SPLIT: buy 1% went to platform wallet", ctx.rpc.balance(&platform).await == plat0 + SOL / 100);
+        check!("SPLIT: launcher buy_creator (bc) got nothing", ctx.rpc.balance(&bc.pubkey()).await == 0);
         check!("SPLIT: sell_creator got nothing from a buy", ctx.rpc.balance(&sc.pubkey()).await == 0);
-        // buy with the WRONG creator account (sc) must be rejected
+        // buy passing any non-platform buy_creator (bc) must be rejected
         let bag2 = match ctx.rpc.account_data(&curve::ata(&sniper.pubkey(), &m2)).await { Some(d) => curve::token_amount(&d), None => 0 };
-        let wrong = send(rpc, &[curve::buy(&program, &sniper.pubkey(), &m2, &sc.pubkey(), SOL, 0)], sniper, &[sniper]).await;
-        check!("SPLIT: buy with wrong buy_creator rejected", wrong.is_err());
+        let wrong = send(rpc, &[curve::buy(&program, &sniper.pubkey(), &m2, &bc.pubkey(), SOL, 0)], sniper, &[sniper]).await;
+        check!("SPLIT: buy with non-platform buy_creator rejected", wrong.is_err());
         // sell: 1% must land on sell_creator (sc)
         let sc_before = ctx.rpc.balance(&sc.pubkey()).await;
         send(rpc, &[curve::sell(&program, &sniper.pubkey(), &m2, &sc.pubkey(), bag2 / 2, 0)], sniper, &[sniper]).await.expect("split sell");
@@ -277,13 +283,13 @@ async fn main() {
 
     // --- 3) First buy: exact out, 3% to floor, creator gets NOTHING on buys ---
     send(rpc, &[curve::create_ata_ix(&buyer.pubkey(), &buyer.pubkey(), &mint)], &buyer, &[&buyer]).await.expect("buyer ata");
-    let creator_bal0 = rpc.balance(&creator.pubkey()).await;
+    let plat_bal0 = rpc.balance(&platform).await;
     let (exp_p1, exp_out1) = expected_buy(CFG.start_price_fp, SOL, 0, 0);
-    match send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &creator.pubkey(), SOL, 0)], &buyer, &[&buyer]).await {
+    match send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &platform, SOL, 0)], &buyer, &[&buyer]).await {
         Ok(_) => {
             check!("buy#1 exact token out", ctx.bag(&buyer.pubkey()).await as u128 == exp_out1);
             check!("buy#1 vault got net + 2% donation (0.99 SOL)", ctx.backing().await == SOL - SOL / 100);
-            check!("buy#1 buy_creator got exact 1%", rpc.balance(&creator.pubkey()).await == creator_bal0 + SOL / 100);
+            check!("buy#1 platform got exact 1%", rpc.balance(&platform).await == plat_bal0 + SOL / 100);
             let c = ctx.curve().await.unwrap();
             check!("buy#1 exact price advance", c.price_fp == exp_p1 && c.price_fp > CFG.start_price_fp);
             check!("buy#1 backing ratio >= 93.5%", ctx.ratio_ok().await);
@@ -295,7 +301,7 @@ async fn main() {
     let p1 = ctx.curve().await.unwrap().price_fp;
     let bag1 = ctx.bag(&buyer.pubkey()).await;
     let (exp_p2, exp_out2) = expected_buy(p1, SOL, ctx.backing().await as u128, ctx.supply().await as u128);
-    match send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &creator.pubkey(), SOL, 0)], &buyer, &[&buyer]).await {
+    match send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &platform, SOL, 0)], &buyer, &[&buyer]).await {
         Ok(_) => {
             let got = ctx.bag(&buyer.pubkey()).await - bag1;
             check!("buy#2 exact token out", got as u128 == exp_out2);
@@ -329,7 +335,7 @@ async fn main() {
     }
 
     // --- 6) Guards -----------------------------------------------------------
-    let too_high = send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &creator.pubkey(), SOL, u64::MAX)], &buyer, &[&buyer]).await;
+    let too_high = send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &platform, SOL, u64::MAX)], &buyer, &[&buyer]).await;
     check!("buy min_out too high rejected", too_high.is_err());
     let sell_high = send(rpc, &[curve::sell(&program, &buyer.pubkey(), &mint, &creator.pubkey(), 1_000, u64::MAX)], &buyer, &[&buyer]).await;
     check!("sell min_out too high rejected", sell_high.is_err());
@@ -346,7 +352,7 @@ async fn main() {
     let pbig = ctx.curve().await.unwrap().price_fp;
     let (_, exp_big) = expected_buy(pbig, 210 * SOL, ctx.backing().await as u128, ctx.supply().await as u128);
     let big_bag0 = ctx.bag(&whale.pubkey()).await;
-    let huge = send(rpc, &[cu_limit(600_000), curve::buy(&program, &whale.pubkey(), &mint, &creator.pubkey(), 210 * SOL, 0)], &whale, &[&whale]).await;
+    let huge = send(rpc, &[cu_limit(600_000), curve::buy(&program, &whale.pubkey(), &mint, &platform, 210 * SOL, 0)], &whale, &[&whale]).await;
     check!("large buy (210 SOL) allowed — no artificial cap", huge.is_ok());
     check!("large buy exact token out matches power law", (ctx.bag(&whale.pubkey()).await - big_bag0) as u128 == exp_big);
     check!("large buy: backing ratio >= 93.5% held", ctx.ratio_ok().await);
@@ -355,7 +361,7 @@ async fn main() {
     let pw = ctx.curve().await.unwrap().price_fp;
     let (exp_pw, exp_outw) = expected_buy(pw, 100 * SOL, ctx.backing().await as u128, ctx.supply().await as u128);
     let wbag0 = ctx.bag(&whale.pubkey()).await;
-    match send(rpc, &[cu_limit(600_000), curve::buy(&program, &whale.pubkey(), &mint, &creator.pubkey(), 100 * SOL, 0)], &whale, &[&whale]).await {
+    match send(rpc, &[cu_limit(600_000), curve::buy(&program, &whale.pubkey(), &mint, &platform, 100 * SOL, 0)], &whale, &[&whale]).await {
         Ok(_) => {
             check!("whale 100 SOL exact out under governor", (ctx.bag(&whale.pubkey()).await - wbag0) as u128 == exp_outw);
             let pa = ctx.curve().await.unwrap().price_fp;
@@ -370,7 +376,7 @@ async fn main() {
     let fresh = Keypair::new();
     send(rpc, &[solana_sdk::system_instruction::transfer(&payer.pubkey(), &fresh.pubkey(), 3 * SOL)], &payer, &[&payer]).await.expect("fund fresh");
     send(rpc, &[curve::create_ata_ix(&fresh.pubkey(), &fresh.pubkey(), &mint)], &fresh, &[&fresh]).await.expect("fresh ata");
-    send(rpc, &[curve::buy(&program, &fresh.pubkey(), &mint, &creator.pubkey(), SOL, 0)], &fresh, &[&fresh]).await.expect("fresh buy");
+    send(rpc, &[curve::buy(&program, &fresh.pubkey(), &mint, &platform, SOL, 0)], &fresh, &[&fresh]).await.expect("fresh buy");
     let fbag = ctx.bag(&fresh.pubkey()).await;
     let (exp_r, _, _) = expected_sell(fbag, ctx.backing().await as u128, ctx.supply().await);
     send(rpc, &[curve::sell(&program, &fresh.pubkey(), &mint, &creator.pubkey(), fbag, 0)], &fresh, &[&fresh]).await.expect("fresh sell");
@@ -387,7 +393,7 @@ async fn main() {
     let s1 = ctx.supply().await as u128;
     check!("big dump RAISED NAV", v1 * s0 > v0 * s1);
     check!("big dump did not move price", ctx.curve().await.unwrap().price_fp == p_pre_dump);
-    send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &creator.pubkey(), SOL, 0)], &buyer, &[&buyer]).await.expect("post-dump buy");
+    send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &platform, SOL, 0)], &buyer, &[&buyer]).await.expect("post-dump buy");
     check!("next buy prints HIGHER than pre-dump price (dump built headroom)",
         ctx.curve().await.unwrap().price_fp > p_pre_dump);
 
@@ -401,7 +407,7 @@ async fn main() {
         let do_buy = rng.gen_bool(0.5);
         let res = if do_buy {
             let amt = rng.gen_range(SOL / 10..=2 * SOL);
-            send(rpc, &[curve::buy(&program, &whale.pubkey(), &mint, &creator.pubkey(), amt, 0)], &whale, &[&whale]).await
+            send(rpc, &[curve::buy(&program, &whale.pubkey(), &mint, &platform, amt, 0)], &whale, &[&whale]).await
         } else {
             let bag = ctx.bag(&whale.pubkey()).await;
             if bag < 100 { continue; }
@@ -438,7 +444,7 @@ async fn main() {
     check!("AUDIT FIX: full exit strands NO backing (supply==0 => backing==0)", leftover == 0);
     println!("      leftover backing after full exit: {} lamports (expect 0)", leftover);
     let p_final = ctx.curve().await.unwrap().price_fp;
-    match send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &creator.pubkey(), SOL, 0)], &buyer, &[&buyer]).await {
+    match send(rpc, &[curve::buy(&program, &buyer.pubkey(), &mint, &platform, SOL, 0)], &buyer, &[&buyer]).await {
         Ok(_) => {
             check!("restart buy after full exit works (S=0 edge)", ctx.bag(&buyer.pubkey()).await > 0);
             check!("price never reset", ctx.curve().await.unwrap().price_fp >= p_final);

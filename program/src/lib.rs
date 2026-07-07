@@ -96,6 +96,13 @@ pub const MAX_DOUBLE_VOL: u64 = 10_000_000_000_000; // 10k SOL per 2x maximum
 pub const MIN_START_PRICE_FP: u128 = 1_000; // 1e-15 SOL/token
 pub const MAX_PRICE_FP: u128 = 1_000_000_000_000_000_000_000_000_000_000; // 1e30
 
+/// The 1% BUY fee is PLATFORM revenue, hardcoded to the platform fee wallet on every
+/// launch. The `buy_creator` init arg is IGNORED and overwritten with this address,
+/// so the buy fee always lands here regardless of who launches the token. (The SELL
+/// creator fee still goes to the token's own `sell_creator`.)
+pub const PLATFORM_BUY_FEE_WALLET: Pubkey =
+    solana_program::pubkey!("Bj6kYwqS7Le5SkwYepMTDUpDZNgmYTfXW9FPAvRq7vsY");
+
 // Custom errors.
 const E_BAD_PARAMS: u32 = 1;
 const E_BAD_PDA: u32 = 2;
@@ -393,7 +400,7 @@ pub fn process_instruction(
 fn initialize(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    buy_creator: Pubkey,
+    _buy_creator: Pubkey, // ignored: buy fee is hardcoded to PLATFORM_BUY_FEE_WALLET
     sell_creator: Pubkey,
     start_price_fp: u128,
     double_vol: u64,
@@ -478,7 +485,7 @@ fn initialize(
 
     let curve = Curve {
         mint: *mint_ai.key,
-        buy_creator,
+        buy_creator: PLATFORM_BUY_FEE_WALLET, // hardcoded platform take, not the launcher
         sell_creator,
         price_fp: start_price_fp,
         double_vol,
@@ -494,7 +501,7 @@ fn initialize(
     msg!(
         "notch: init mint={} buy_creator={} sell_creator={} price_fp={} backing>={}",
         mint_ai.key,
-        buy_creator,
+        PLATFORM_BUY_FEE_WALLET,
         sell_creator,
         start_price_fp,
         min_backing_bps
