@@ -17,7 +17,7 @@ Say you buy with 1 SOL:
 
 1. 3% (0.03 SOL) goes straight into the vault. This raises the floor for everyone, including you.
 2. 97% mints you tokens at the current curve price.
-3. The price ratchets up a little because of your buy. It will never come back down.
+3. The price notches up a little because of your buy. It will never come back down.
 
 You cannot get front-run into a dump: there is no pool, and the price you see is the price the program gives you (slippage-protected with `min_out`).
 
@@ -48,7 +48,7 @@ From the exact math, 100 people buying 1 SOL each:
 - Buyer 1 enters at 0.00001000 and is immediately over-backed (floor above entry). After one wave of volume he exits at +22% to +30% AT THE FLOOR, not on paper.
 - Buyer 100 enters at 0.00001558. If he panic-sells instantly he takes the worst case, about -14.7%. If he waits, any future volume in either direction pulls him toward profit, and nothing can pull him away from it.
 
-That last part is the key mental model: **your exit value is a one-way ratchet**. Time and volume can only improve it.
+That last part is the key mental model: **your exit value only notches up**. Time and volume can only improve it.
 
 ## Honest FAQ
 

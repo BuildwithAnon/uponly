@@ -113,7 +113,7 @@ NOTCH does not escape this law. It makes the trade-off explicit, configurable pe
 | 9350 (93.5%) | ~14.75% | 0.093 | reference: bounded pain, steady climb |
 | 9000 (90%) | ~17.9% | 0.127 | tradeable, faster chart |
 | 7500 (75%) | ~31% | 0.273 | degen leaning, fast |
-| 0 (off) | unbounded | schedule-only | pure ratchet curve, price detaches from backing at scale |
+| 0 (off) | unbounded | schedule-only | pure notch curve, price detaches from backing at scale |
 
 All other knobs (fees, their creator/floor split, launch price, schedule) are also per-launch `Initialize` parameters. The program enforces sanity caps so no launch can be configured abusively (creator fees max 5% per side).
 

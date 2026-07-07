@@ -1,4 +1,4 @@
-//! NOTCH — ratchet-curve token vault. The quoted price can only go UP.
+//! NOTCH — notch-curve token vault. The quoted price only NOTCHES up.
 //!
 //! v2 tokenomics (per-launch config, immutable after Initialize):
 //!   * BUY fee (e.g. 3%): `buy_fee_creator_bps` to the creator wallet,
@@ -55,14 +55,30 @@ const TOKEN_PROGRAM: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5
 /// scaled by FP. So lamports per base unit = price_fp / 1e18.
 pub const FP: u128 = 1_000_000_000;
 const E18: u128 = 1_000_000_000_000_000_000;
-/// ln(2) * FP.
-const LN2_FP: u128 = 693_147_181;
-/// Price advance is compounded in chunks of double_vol/32 for accuracy
-/// (~0.7% conservative per doubling vs exact 2^x).
-const CHUNK_DIV: u128 = 32;
-/// A single Buy may advance the curve at most 8 doublings (bounds the chunk
-/// loop at 256 iterations). Bigger buys must be split across transactions.
-const MAX_BUY_DOUBLINGS: u128 = 8;
+/// Fixed-point (Q48) scale for the path-independent power-law mint. Buys mint
+/// `S1 = S0 * (Vf/V0)^backing` exactly in integer math (see `pow_ratio_q`),
+/// which is composable — buy(a) then buy(b) == buy(a+b) — so the minted amount
+/// no longer depends on how a buy is split. (The old chunked `2^(net/double_vol)`
+/// curve carried a laggy price and was path-dependent: splitting a buy farmed
+/// free tokens. `double_vol`/`price_fp` remain in state but no longer drive the
+/// mint; `price_fp` is now just the reported governor price NAV/backing.)
+const POW_F: u32 = 48;
+const POW_ONE: u128 = 1u128 << POW_F; // 2^48 == 1.0 in Q48
+/// TWO_POW_LUT[i] = round(2^(2^-i) * 2^48), i = 1..=48 (index 0 unused).
+const TWO_POW_LUT: [u128; 49] = [
+    0, 398065729532861, 334732044999537, 306950638654744, 293936938588305,
+    287638476118103, 284540038248454, 283003357999923, 282238132792268,
+    281856296460737, 281665572056717, 281570258256901, 281522613452764,
+    281498794074042, 281486885140443, 281480930862574, 281477953770871,
+    281476465236828, 281475720972758, 281475348841461, 281475162775997,
+    281475069743311, 281475023226980, 281474999968817, 281474988339736,
+    281474982525196, 281474979617926, 281474978164291, 281474977437473,
+    281474977074065, 281474976892360, 281474976801508, 281474976756082,
+    281474976733369, 281474976722013, 281474976716334, 281474976713495,
+    281474976712076, 281474976711366, 281474976711011, 281474976710833,
+    281474976710745, 281474976710700, 281474976710678, 281474976710667,
+    281474976710662, 281474976710659, 281474976710657, 281474976710657,
+];
 
 /// Hard caps so a launch can't be configured degenerately.
 pub const MAX_CREATOR_FEE_BPS: u16 = 500; // 5% per side
@@ -91,6 +107,69 @@ const E_CURVE_SATURATED: u32 = 12;
 
 fn err(code: u32) -> ProgramError {
     ProgramError::Custom(code)
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-point power (Q48): computes ratio^backing with no floats, for the
+// path-independent mint. log2 by repeated squaring; exp2 by the 2^(2^-i) table.
+// ---------------------------------------------------------------------------
+
+/// log2(x / 2^48) in Q48, for x >= 2^48 (i.e. value >= 1).
+fn log2_q(mut x: u128) -> u128 {
+    let mut e: u128 = 0;
+    while x >= (POW_ONE << 1) {
+        x >>= 1;
+        e += 1;
+    }
+    // x is now in [2^48, 2^49): the mantissa is in [1, 2).
+    let mut result = e << POW_F;
+    let mut i: u32 = 1;
+    while i <= POW_F {
+        x = (x * x) >> POW_F; // x < 2^49 => x*x < 2^98, safe in u128
+        if x >= (POW_ONE << 1) {
+            result += POW_ONE >> i;
+            x >>= 1;
+        }
+        i += 1;
+    }
+    result
+}
+
+/// 2^(y / 2^48) in Q48. Saturates to u128::MAX on overflow (the caller then
+/// fails the buy as too large; safe because minting is now split-invariant).
+fn exp2_q(y: u128) -> u128 {
+    let int_part = y >> POW_F;
+    let frac = y & (POW_ONE - 1);
+    let mut r = POW_ONE; // 1.0 in Q48
+    let mut i: u32 = 1;
+    while i <= POW_F {
+        if frac & (POW_ONE >> i) != 0 {
+            r = (r * TWO_POW_LUT[i as usize]) >> POW_F; // r,LUT < 2^49 => < 2^98
+        }
+        i += 1;
+    }
+    if int_part >= 128 {
+        return u128::MAX;
+    }
+    let ip = int_part as u32;
+    if r > (u128::MAX >> ip) {
+        u128::MAX
+    } else {
+        r << ip
+    }
+}
+
+/// (num / den)^(bps / 10000) in Q48. Requires num >= den >= 1. Returns None on
+/// overflow (buy too large relative to the pool — split it; split-invariant).
+fn pow_ratio_q(num: u128, den: u128, bps: u16) -> Option<u128> {
+    if den == 0 || num < den {
+        return None;
+    }
+    let ratio = num.checked_mul(POW_ONE)? / den; // >= 2^48
+    let l = log2_q(ratio);
+    let b = (bps as u128 * POW_ONE) / 10_000;
+    let bl = l.checked_mul(b)? >> POW_F;
+    Some(exp2_q(bl))
 }
 
 // ---------------------------------------------------------------------------
@@ -455,11 +534,6 @@ fn buy(program_id: &Pubkey, accounts: &[AccountInfo], lamports: u64, min_out: u6
     if net == 0 {
         return Err(err(E_ZERO_AMOUNT));
     }
-    let d = curve.double_vol as u128;
-    if net as u128 > MAX_BUY_DOUBLINGS * d {
-        // Bounds the price-advance loop; split absurdly large buys.
-        return Err(err(E_BUY_TOO_LARGE));
-    }
 
     // Pre-transfer snapshot; the floor donation counts as landed before minting.
     let v_pre = backing(curve_ai)? as u128;
@@ -477,62 +551,46 @@ fn buy(program_id: &Pubkey, accounts: &[AccountInfo], lamports: u64, min_out: u6
         )?;
     }
 
-    // Advance the curve in chunks with RUNNING NAV: each chunk mints at its
-    // trapezoid-average price, never below NAV, and the governor caps the
-    // price at NAV * 10000 / min_backing_bps so the gap is bounded forever.
-    let chunk = core::cmp::max(d / CHUNK_DIV, 1);
-    let mut remaining = net as u128;
-    let mut v_run = v_pre.checked_add(donation as u128).ok_or(err(E_OVERFLOW))?;
-    let mut p = curve.price_fp;
-    let mut out: u128 = 0;
-    while remaining > 0 {
-        let c = core::cmp::min(remaining, chunk);
-        let p0 = p;
-        // dp = p * ln2 * c / d  (compounded per chunk => ~2^(net/d) overall)
-        let step_fp = LN2_FP * c / d;
-        p = p.checked_add(p.checked_mul(step_fp).ok_or(err(E_OVERFLOW))? / FP).ok_or(err(E_OVERFLOW))?;
-        let s_run = s0 + out;
-        let pe;
-        if s_run > 0 {
-            let nav = v_run.checked_mul(E18).ok_or(err(E_OVERFLOW))? / s_run;
-            if curve.min_backing_bps > 0 {
-                // cap = nav / backing_ratio; on mul-overflow the backing is so
-                // rich that no clamp is needed.
-                let cap = nav
-                    .checked_mul(10_000)
-                    .map(|x| x / curve.min_backing_bps as u128)
-                    .unwrap_or(u128::MAX);
-                if p > cap {
-                    p = cap;
-                }
-                if p < p0 {
-                    p = p0; // price never goes down
-                }
-            }
-            let mut pe_ = (p0 + p) / 2;
-            if pe_ <= nav {
-                pe_ = nav + nav / 10_000 + 1;
-            }
-            pe = pe_;
-        } else {
-            pe = (p0 + p) / 2;
-        }
-        if p > MAX_PRICE_FP {
-            return Err(err(E_CURVE_SATURATED));
-        }
-        // units = c lamports * 1e18 / price_fp
-        out = out
-            .checked_add(c.checked_mul(E18).ok_or(err(E_OVERFLOW))? / pe)
-            .ok_or(err(E_OVERFLOW))?;
-        v_run += c;
-        remaining -= c;
-    }
+    // Path-independent mint at the governor price. The floor donation lands
+    // first (lifts NAV for existing holders), then the net buy mints tokens at
+    // price = NAV / backing. Integrated exactly this is a power law:
+    //   S1 = S0 * (Vf / V0)^backing,   V0 = v_pre + donation,   Vf = V0 + net.
+    // Composable => splitting a buy across txs can't change the result, so no
+    // one can farm free tokens by chunking (the old exponential's bug). Minting
+    // rounds DOWN (>> POW_F, integer div), so NAV only ever rounds up: the
+    // floor is monotone nondecreasing by construction.
+    let v0 = v_pre.checked_add(donation as u128).ok_or(err(E_OVERFLOW))?;
+    let vf = v0.checked_add(net as u128).ok_or(err(E_OVERFLOW))?;
+    let out: u128 = if s0 == 0 {
+        // Genesis: no NAV yet. Mint at the configured start price.
+        (net as u128)
+            .checked_mul(E18)
+            .ok_or(err(E_OVERFLOW))?
+            / curve.price_fp
+    } else {
+        // S1 = S0 * (Vf/V0)^backing, then out = S1 - S0. None => buy too large
+        // relative to the pool; split it (result is now split-invariant).
+        let factor = pow_ratio_q(vf, v0, curve.min_backing_bps).ok_or(err(E_BUY_TOO_LARGE))?;
+        let s1 = s0.checked_mul(factor).ok_or(err(E_BUY_TOO_LARGE))? >> POW_F;
+        s1.checked_sub(s0).ok_or(err(E_OVERFLOW))?
+    };
     let out64 = u64::try_from(out).map_err(|_| err(E_OVERFLOW))?;
     if out64 == 0 || out64 < min_out {
         return Err(err(E_SLIPPAGE));
     }
 
+    // Reported price = NAV / backing after the buy (never decreases).
+    let s_new = s0.checked_add(out).ok_or(err(E_OVERFLOW))?;
+    let nav_new = vf.checked_mul(E18).ok_or(err(E_OVERFLOW))? / s_new;
+    let price_new = nav_new
+        .checked_mul(10_000)
+        .map(|x| x / curve.min_backing_bps as u128)
+        .unwrap_or(u128::MAX);
     let price_before = curve.price_fp;
+    let p = core::cmp::max(price_new, curve.price_fp);
+    if p > MAX_PRICE_FP {
+        return Err(err(E_CURVE_SATURATED));
+    }
     curve.price_fp = p;
     curve.cum_vol = curve.cum_vol.saturating_add(net as u128);
     store_curve(&curve, curve_ai)?;

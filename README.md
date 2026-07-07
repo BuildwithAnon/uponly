@@ -2,13 +2,13 @@
 
 **A Solana token standard where the chart price can never go down. Not as a promise, as a property of the code.**
 
-NOTCH is a ratchet-curve token vault. Every token trades against its own on-chain vault instead of a DEX pool. Buys advance the price. Sells redeem against the vault floor and leave a fee behind that raises the floor for everyone still holding. The price is mathematically incapable of printing a red candle, and the worst possible outcome for any buyer is bounded on-chain at 15% all-in.
+NOTCH is a notch-curve token vault. Every token trades against its own on-chain vault instead of a DEX pool. Buys advance the price. Sells redeem against the vault floor and leave a fee behind that raises the floor for everyone still holding. The price is mathematically incapable of printing a red candle, and the worst possible outcome for any buyer is bounded on-chain at 15% all-in.
 
 Proven with 34/34 on-chain tests, including a randomized fuzz that asserts price and floor never decreased once.
 
 ## The five properties
 
-1. **Price only goes up.** Buys move it up on a curve. Sells do not touch it. There is no pool to dump into.
+1. **Price only notches up.** Buys move it up on a curve. Sells do not touch it. There is no pool to dump into.
 2. **Sells make the token stronger.** 5% of every exit stays in the vault, so every seller raises the floor under every remaining holder. In testing, a wave of sells pushed the floor above the last printed price, and the next buy printed a new all-time high.
 3. **Hard loss cap, enforced on-chain.** A governor keeps the vault backing at 93.5% of the price minimum. Worst case for any buyer at any time, buying the top and dumping instantly: 14.75% loss, fees included. Verified live in the test suite at 14.7%.
 4. **Non-custodial by construction.** The program has no admin instructions. No withdraw, no pause, no config change. Vault SOL can only leave through holder redemptions. The creator receives flow fees only and can never touch the vault.
@@ -20,7 +20,7 @@ Proven with 34/34 on-chain tests, including a randomized fuzz that asserts price
 BUY 1 SOL                                 SELL tokens
   3% -> vault (raises floor instantly)      redeemed at NAV (vault / supply)
  97% -> mints tokens at curve price         94% -> seller
-        price ratchets up, capped            5% -> stays in vault (floor rises)
+        price notches up, capped            5% -> stays in vault (floor rises)
         at NAV / 0.935 by the governor       1% -> creator
 ```
 

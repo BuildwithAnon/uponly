@@ -272,7 +272,7 @@ async fn main() {
         Ok(_) => {
             let got = ctx.bag(&buyer.pubkey()).await - bag1;
             check!("buy#2 exact token out", got as u128 == exp_out2);
-            check!("buy#2 fewer tokens than buy#1 (price ratcheted)", got < bag1);
+            check!("buy#2 fewer tokens than buy#1 (price notched up)", got < bag1);
             check!("buy#2 price monotone up", ctx.curve().await.unwrap().price_fp == exp_p2 && exp_p2 > p1);
         }
         Err(e) => { check!("buy#2", false); println!("      err: {}", e); }
