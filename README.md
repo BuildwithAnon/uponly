@@ -58,11 +58,11 @@ The platform enforces backing in `[82.5%, 99%]`, so no launch can exceed about 2
 ## Repository layout
 
 ```
-program/   on-chain program (native Solana, no Anchor, ~600 lines)
+program/   on-chain program (native Solana, no Anchor, ~800 lines)
 client/    Rust client: instruction builders + the 46-test suite
 sim/       Python simulator mirroring the exact integer math
 data/      datasets generated from the exact math
-docs/      TOKENOMICS.md, GUIDE.md, TESTING.md, DATASETS.md
+docs/      TOKENOMICS.md, GUIDE.md, TESTING.md, DATASETS.md, AUDIT.md
 ```
 
 ## Build & test

@@ -13,8 +13,7 @@ Usage:
 import sys
 
 # ---------------------------------------------------------------- CONFIG ---
-START_PRICE_FP = 10_000 * 10**9   # 0.00001 SOL per token (lamports/token * 1e9)
-DOUBLE_VOL     = 25 * 10**9       # schedule: price 2x per 25 SOL of buys
+START_PRICE_FP = 10**18           # 1 SOL per token (lamports/token * 1e9), the platform launch price
 BUY_FEE_CREATOR_BPS = 100         # buys: 1% to the platform wallet
 BUY_FEE_FLOOR_BPS   = 200         # buys: 2% donated straight to the vault
 SELL_FEE_CREATOR_BPS = 100        # sells: creator share of gross

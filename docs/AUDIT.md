@@ -1,6 +1,6 @@
 # NOTCH Security Audit
 
-Internal adversarial audit of `program/src/lib.rs`. Eight independent reviewers each took one attack surface (arithmetic and rounding, account and signer validation, SPL byte parsing, economic and game-theoretic invariants, CPI and lamport handling, initialization and lifecycle, denial of service and griefing, value conservation and accounting). Every raw finding was then handed to a separate adversarial verifier whose job was to refute it by tracing the actual guards.
+Internal adversarial audit of `program/src/lib.rs`. The code excerpts in the finding below describe the program as it stood at audit time, before the mint was rewritten as a single path-independent power law; the fixed invariant (supply == 0 implies backing == 0) is unchanged and remains regression-tested in the current suite. Eight independent reviewers each took one attack surface (arithmetic and rounding, account and signer validation, SPL byte parsing, economic and game-theoretic invariants, CPI and lamport handling, initialization and lifecycle, denial of service and griefing, value conservation and accounting). Every raw finding was then handed to a separate adversarial verifier whose job was to refute it by tracing the actual guards.
 
 Result: 21 raw findings, 18 refuted as already-guarded or non-exploitable, 1 genuine defect (surfaced by three reviewers at different severities, one root cause). The defect is fixed; details below.
 
