@@ -44,6 +44,17 @@ use solana_program::{
     sysvar::Sysvar,
 };
 
+// Machine-readable contact and source info, embedded in the binary so explorers
+// and security researchers can find it (solana-security-txt standard).
+solana_security_txt::security_txt! {
+    name: "NOTCH",
+    project_url: "https://notch.fund",
+    contacts: "email:sam3dsol@gmail.com,link:https://notch.fund/.well-known/security.txt",
+    policy: "https://notch.fund/safety",
+    preferred_languages: "en",
+    source_code: "https://github.com/sam3dsol/notch"
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
