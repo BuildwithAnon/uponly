@@ -96,11 +96,11 @@ const TWO_POW_LUT: [u128; 49] = [
     281474976710662, 281474976710659, 281474976710657, 281474976710657,
 ];
 
-/// Hard caps so a launch can't be configured degenerately.
+/// Hard caps so a launch can't be configured with unsafe parameters.
 pub const MAX_CREATOR_FEE_BPS: u16 = 500; // 5% per side
 pub const MAX_BUY_FLOOR_BPS: u16 = 1_000; // 10%
 pub const MAX_SELL_FLOOR_BPS: u16 = 2_000; // 20%
-pub const MIN_BACKING_FLOOR_BPS: u16 = 8_250; // PLATFORM RULE: backing >= 82.5% => max round-trip loss <= 25% at 3%/6% fees (no ungoverned/degen launches)
+pub const MIN_BACKING_FLOOR_BPS: u16 = 8_250; // PLATFORM RULE: backing >= 82.5% => max round-trip loss <= 25% at 3%/6% fees (no ungoverned launches)
 pub const MAX_BACKING_BPS: u16 = 9_900; // and at most 99% (100% = zero speed)
 pub const MIN_DOUBLE_VOL: u64 = 1_000_000_000; // 1 SOL per 2x minimum
 pub const MAX_DOUBLE_VOL: u64 = 10_000_000_000_000; // 10k SOL per 2x maximum
