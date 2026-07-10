@@ -60,9 +60,10 @@ The platform enforces backing in `[82.5%, 99%]`, so no launch can exceed about 2
 ```
 program/   on-chain program (native Solana, no Anchor, ~800 lines)
 client/    Rust client: instruction builders + the 46-test suite
+multisig/  Squads v4 upgrade tooling (2-of-2 upgrade authority)
 sim/       Python simulator mirroring the exact integer math
 data/      datasets generated from the exact math
-docs/      TOKENOMICS.md, GUIDE.md, TESTING.md, DATASETS.md, AUDIT.md
+docs/      TOKENOMICS.md, GUIDE.md, TESTING.md, DATASETS.md, AUDIT.md, UPGRADE-AUTHORITY.md
 ```
 
 ## Build & test
@@ -80,8 +81,9 @@ Expected: 46 PASS, 0 FAIL. Also `cd program && cargo test` for the native mint u
 ## Status
 
 - **Live on mainnet** at `DQf1BBhRNnhthJUmsCT6Rt2whodZyNLbsqKQ3kHYUU6N` (upgradeable).
+- **Upgrade authority is a 2-of-2 Squads multisig** (`Cw3BeNU8QTH5MhY12XqTincrMXjP59p8ALpzsLiBq8LU`): no single party can upgrade, close, or re-authorize the program. Details and verification in [docs/UPGRADE-AUTHORITY.md](docs/UPGRADE-AUTHORITY.md).
 - Passes 46/46 on-chain tests plus 4 native unit tests, including a randomized fuzz that asserts price and floor never fall.
-- **Not independently audited.** Reviewed and tested in-house only. The upgrade authority is currently retained, so the program is not yet immutable. Only commit what you can afford to lose.
+- **Not independently audited.** Reviewed and tested in-house only. The program is not yet immutable (upgrades remain possible through the multisig). Only commit what you can afford to lose.
 
 ## License
 
