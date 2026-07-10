@@ -66,6 +66,7 @@ pub const CURVE_SEED: &[u8] = b"curve";
 pub const CURVE_SIZE: usize = 32 + 32 + 32 + 16 + 8 + 2 + 2 + 2 + 2 + 2 + 16 + 1; // = 147 (mint + buy_creator + sell_creator + ...)
 
 const TOKEN_PROGRAM: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const TOKEN_METADATA_PROGRAM: Pubkey = pubkey!("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 
 /// Fixed-point scale. `price_fp` = lamports per WHOLE token (1e9 base units),
 /// scaled by FP. So lamports per base unit = price_fp / 1e18.
@@ -254,6 +255,14 @@ pub enum CurveInstruction {
     ///            mint (writable), seller_token_account (writable),
     ///            sell_creator (writable), token_program]
     Sell { units: u64, min_out: u64 },
+    /// One-shot: create the Metaplex metadata account for a mint whose
+    /// authority is the curve PDA (tokens launched before the UI flow added
+    /// metadata at launch). Only the curve's sell_creator (the launcher) may
+    /// call; Token Metadata rejects the CPI if the account already exists, so
+    /// an existing name can never be rewritten through this path.
+    /// Accounts: [launcher (signer, writable), curve PDA, mint,
+    ///            metadata PDA (writable), token_metadata_program, system_program]
+    CreateMetadata { name: String, symbol: String, uri: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +409,9 @@ pub fn process_instruction(
         ),
         CurveInstruction::Buy { lamports, min_out } => buy(program_id, accounts, lamports, min_out),
         CurveInstruction::Sell { units, min_out } => sell(program_id, accounts, units, min_out),
+        CurveInstruction::CreateMetadata { name, symbol, uri } => {
+            create_metadata(program_id, accounts, name, symbol, uri)
+        }
     }
 }
 
@@ -707,6 +719,83 @@ fn sell(program_id: &Pubkey, accounts: &[AccountInfo], units: u64, min_out: u64)
     }
 
     msg!("notch: sell {} units -> {} lamports (floor kept {})", units, to_seller, floor_keep as u64);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CreateMetadata
+// ---------------------------------------------------------------------------
+
+fn create_metadata(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    name: String,
+    symbol: String,
+    uri: String,
+) -> ProgramResult {
+    let ai = &mut accounts.iter();
+    let launcher_ai = next_account_info(ai)?;
+    let curve_ai = next_account_info(ai)?;
+    let mint_ai = next_account_info(ai)?;
+    let metadata_ai = next_account_info(ai)?;
+    let metadata_program_ai = next_account_info(ai)?;
+    let system_ai = next_account_info(ai)?;
+
+    if !launcher_ai.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if *metadata_program_ai.key != TOKEN_METADATA_PROGRAM || *system_ai.key != system_program::ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    let curve = load_curve(program_id, curve_ai, mint_ai)?;
+    if *launcher_ai.key != curve.sell_creator {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if name.len() > 32 || symbol.len() > 10 || uri.len() > 200 {
+        return Err(err(E_BAD_PARAMS));
+    }
+
+    // CreateMetadataAccountV3, mint authority = curve PDA (signed via seeds),
+    // update authority = the launcher. Token Metadata itself verifies the
+    // metadata PDA derivation and fails if the account already exists.
+    let mut data =
+        Vec::with_capacity(1 + 4 + name.len() + 4 + symbol.len() + 4 + uri.len() + 2 + 3 + 1 + 1);
+    data.push(33u8); // CreateMetadataAccountV3
+    for s in [&name, &symbol, &uri] {
+        data.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        data.extend_from_slice(s.as_bytes());
+    }
+    data.extend_from_slice(&0u16.to_le_bytes()); // seller_fee_basis_points
+    data.extend_from_slice(&[0, 0, 0]); // creators / collection / uses = None
+    data.push(1); // is_mutable
+    data.push(0); // collection_details = None
+
+    let ix = Instruction {
+        program_id: TOKEN_METADATA_PROGRAM,
+        accounts: vec![
+            AccountMeta::new(*metadata_ai.key, false),
+            AccountMeta::new_readonly(*mint_ai.key, false),
+            AccountMeta::new_readonly(*curve_ai.key, true), // mint authority
+            AccountMeta::new(*launcher_ai.key, true),       // payer
+            AccountMeta::new_readonly(*launcher_ai.key, false), // update authority
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data,
+    };
+    invoke_signed(
+        &ix,
+        &[
+            metadata_ai.clone(),
+            mint_ai.clone(),
+            curve_ai.clone(),
+            launcher_ai.clone(),
+            system_ai.clone(),
+            metadata_program_ai.clone(),
+        ],
+        &[&[CURVE_SEED, mint_ai.key.as_ref(), &[curve.bump]]],
+    )?;
+
+    msg!("notch: metadata created for mint {}", mint_ai.key);
     Ok(())
 }
 
