@@ -60,6 +60,10 @@ solana_security_txt::security_txt! {
 // ---------------------------------------------------------------------------
 
 pub const CURVE_SEED: &[u8] = b"curve";
+/// Zero-data, system-owned PDA the Sell payout hops through so the seller and
+/// creator legs are real System transfers (explorers render those); it never
+/// holds lamports across instructions.
+pub const PAYOUT_SEED: &[u8] = b"payout";
 /// mint(32) buy_creator(32) sell_creator(32) price_fp(16) double_vol(8)
 /// buy_fee_creator(2) buy_fee_floor(2) sell_fee_creator(2) sell_fee_floor(2)
 /// min_backing(2) cum_vol(16) bump(1)
@@ -253,7 +257,10 @@ pub enum CurveInstruction {
     /// Burn `units`, redeem at NAV minus sell fees (floor share stays).
     /// Accounts: [seller (signer, writable), curve PDA (writable),
     ///            mint (writable), seller_token_account (writable),
-    ///            sell_creator (writable), token_program]
+    ///            sell_creator (writable), token_program,
+    ///            payout PDA (writable, optional), system_program (optional)]
+    /// With the two optional accounts the payout legs are real System
+    /// transfers (explorer-visible); without them, direct lamport moves.
     Sell { units: u64, min_out: u64 },
     /// One-shot: create the Metaplex metadata account for a mint whose
     /// authority is the curve PDA (tokens launched before the UI flow added
@@ -702,17 +709,58 @@ fn sell(program_id: &Pubkey, accounts: &[AccountInfo], units: u64, min_out: u64)
         return Err(err(E_INSUFFICIENT_VAULT));
     }
 
-    // Burn first (seller signs the burn), then pay out via direct lamport moves
-    // (curve PDA is program-owned so the program may debit it).
+    // Burn first (seller signs the burn), then pay out of the vault.
     invoke(
         &spl_burn(seller_ta_ai.key, mint_ai.key, seller_ai.key, units),
         &[seller_ta_ai.clone(), mint_ai.clone(), seller_ai.clone(), token_ai.clone()],
     )?;
 
+    // If the caller passes the payout PDA + system program (accounts 7 and 8),
+    // route the redemption through it with real System transfers so explorers
+    // render the SOL flow as first-class transfer rows. The curve PDA carries
+    // data, so System transfer can't debit it directly; the zero-data payout
+    // PDA exists only within this instruction (fully drained before return).
+    // Without the extra accounts, pay by direct lamport moves as before, so
+    // older transaction shapes keep working.
+    let via_payout = (|| -> Option<(AccountInfo, AccountInfo, u8)> {
+        let payout_ai = next_account_info(ai).ok()?.clone();
+        let system_ai = next_account_info(ai).ok()?.clone();
+        if *system_ai.key != system_program::ID { return None; }
+        let (expect, bump) = Pubkey::find_program_address(&[PAYOUT_SEED], program_id);
+        if expect != *payout_ai.key || !payout_ai.data_is_empty() || payout_ai.owner != &system_program::ID { return None; }
+        Some((payout_ai, system_ai, bump))
+    })();
+
     **curve_ai.try_borrow_mut_lamports()? -= vault_out;
-    **seller_ai.try_borrow_mut_lamports()? += to_seller;
-    if creator_fee > 0 {
-        **sell_creator_ai.try_borrow_mut_lamports()? += creator_fee;
+    match via_payout {
+        Some((payout_ai, system_ai, bump)) => {
+            **payout_ai.try_borrow_mut_lamports()? += vault_out;
+            let seeds: &[&[u8]] = &[PAYOUT_SEED, &[bump]];
+            // The curve rides along as an extra (ignored) account so the CPI's
+            // committed set carries both sides of the direct move (curve -X,
+            // payout +X); without it the runtime's pre-CPI balance check sees
+            // only the +X and rejects the frame as unbalanced.
+            let mut t = system_instruction::transfer(payout_ai.key, seller_ai.key, to_seller);
+            t.accounts.push(AccountMeta::new(*curve_ai.key, false));
+            invoke_signed(
+                &t,
+                &[payout_ai.clone(), seller_ai.clone(), curve_ai.clone(), system_ai.clone()],
+                &[seeds],
+            )?;
+            if creator_fee > 0 {
+                invoke_signed(
+                    &system_instruction::transfer(payout_ai.key, sell_creator_ai.key, creator_fee),
+                    &[payout_ai.clone(), sell_creator_ai.clone(), system_ai.clone()],
+                    &[seeds],
+                )?;
+            }
+        }
+        None => {
+            **seller_ai.try_borrow_mut_lamports()? += to_seller;
+            if creator_fee > 0 {
+                **sell_creator_ai.try_borrow_mut_lamports()? += creator_fee;
+            }
+        }
     }
     if curve_ai.lamports() < rent_floor()? {
         return Err(err(E_INSUFFICIENT_VAULT));
