@@ -217,8 +217,67 @@ async fn main() {
         .await
         .expect("create mint");
 
+    // --- 0) LAUNCH HOLD-GATE setup: the dev NOTCH stand-in mint --------------
+    // The program (built with --features dev-mint) hardcodes this mint for the
+    // launch hold-gate: Initialize requires the payer to HOLD >= 0.1 NOTCH in
+    // a token account they own. Checked, never debited.
+    let notch_kp = load_kp(&std::env::var("DEV_NOTCH_KP").unwrap_or_else(|_| {
+        if std::path::Path::new("client/dev-notch-mint.json").exists() {
+            "client/dev-notch-mint.json".into()
+        } else {
+            "dev-notch-mint.json".into()
+        }
+    }));
+    let notch_mint = notch_kp.pubkey();
+    const MIN_NOTCH: u64 = 100_000_000; // 0.1 NOTCH at 9 decimals
+    if ctx.rpc.account_data(&notch_mint).await.is_none() {
+        send(rpc, &curve::create_plain_mint_ixs(&payer.pubkey(), &notch_mint, &payer.pubkey(), mint_rent), &payer, &[&payer, &notch_kp])
+            .await
+            .expect("create dev NOTCH mint");
+    }
+    // Fund the main test creator with plenty of NOTCH (payer of every launch below).
+    let notch_ta = curve::ata(&creator.pubkey(), &notch_mint);
+    send(rpc, &[curve::create_ata_ix(&payer.pubkey(), &creator.pubkey(), &notch_mint)], &payer, &[&payer]).await.expect("creator notch ata");
+    send(rpc, &[curve::mint_to_ix(&notch_mint, &notch_ta, &payer.pubkey(), 10 * MIN_NOTCH)], &payer, &[&payer]).await.expect("fund creator notch");
+
+    // --- 0b) HOLD-GATE: launching without 0.1 NOTCH is impossible ------------
+    {
+        let gate = Keypair::new();
+        send(rpc, &[solana_sdk::system_instruction::transfer(&payer.pubkey(), &gate.pubkey(), 2 * SOL)], &payer, &[&payer]).await.expect("fund gate");
+        let mk = Keypair::new();
+        let gm = mk.pubkey();
+        send(rpc, &curve::create_mint_ixs(&program, &payer.pubkey(), &gm, mint_rent), &payer, &[&payer, &mk]).await.expect("gate mint");
+        let gate_ta = curve::ata(&gate.pubkey(), &notch_mint);
+        // (a) no NOTCH token account at all
+        let r = send(rpc, &[curve::initialize(&program, &gate.pubkey(), &gate.pubkey(), &gate.pubkey(), &gm, &gate_ta, &CFG)], &gate, &[&gate]).await;
+        check!("HOLD-GATE: launch with no NOTCH account rejected", r.is_err());
+        // (b) balance below the 0.1 NOTCH minimum
+        send(rpc, &[curve::create_ata_ix(&gate.pubkey(), &gate.pubkey(), &notch_mint)], &gate, &[&gate]).await.expect("gate ata");
+        send(rpc, &[curve::mint_to_ix(&notch_mint, &gate_ta, &payer.pubkey(), MIN_NOTCH / 2)], &payer, &[&payer]).await.expect("gate fund half");
+        let r = send(rpc, &[curve::initialize(&program, &gate.pubkey(), &gate.pubkey(), &gate.pubkey(), &gm, &gate_ta, &CFG)], &gate, &[&gate]).await;
+        check!("HOLD-GATE: 0.05 NOTCH rejected (< 0.1 minimum)", r.is_err());
+        // (c) someone else's funded NOTCH account is not yours
+        let r = send(rpc, &[curve::initialize(&program, &gate.pubkey(), &gate.pubkey(), &gate.pubkey(), &gm, &notch_ta, &CFG)], &gate, &[&gate]).await;
+        check!("HOLD-GATE: another wallet's NOTCH account rejected", r.is_err());
+        // (d) a well-funded token account of the WRONG mint
+        let wk = Keypair::new();
+        let wrong_mint = wk.pubkey();
+        send(rpc, &curve::create_plain_mint_ixs(&payer.pubkey(), &wrong_mint, &payer.pubkey(), mint_rent), &payer, &[&payer, &wk]).await.expect("wrong mint");
+        let wrong_ta = curve::ata(&gate.pubkey(), &wrong_mint);
+        send(rpc, &[curve::create_ata_ix(&gate.pubkey(), &gate.pubkey(), &wrong_mint)], &gate, &[&gate]).await.expect("wrong ata");
+        send(rpc, &[curve::mint_to_ix(&wrong_mint, &wrong_ta, &payer.pubkey(), 10 * MIN_NOTCH)], &payer, &[&payer]).await.expect("wrong fund");
+        let r = send(rpc, &[curve::initialize(&program, &gate.pubkey(), &gate.pubkey(), &gate.pubkey(), &gm, &wrong_ta, &CFG)], &gate, &[&gate]).await;
+        check!("HOLD-GATE: wrong-mint token account rejected", r.is_err());
+        // (e) exactly 0.1 NOTCH unlocks launching; the balance is held, not spent
+        send(rpc, &[curve::mint_to_ix(&notch_mint, &gate_ta, &payer.pubkey(), MIN_NOTCH - MIN_NOTCH / 2)], &payer, &[&payer]).await.expect("gate top-up");
+        let r = send(rpc, &[curve::initialize(&program, &gate.pubkey(), &gate.pubkey(), &gate.pubkey(), &gm, &gate_ta, &CFG)], &gate, &[&gate]).await;
+        check!("HOLD-GATE: exactly 0.1 NOTCH launches", r.is_ok());
+        let held = match ctx.rpc.account_data(&gate_ta).await { Some(d) => curve::token_amount(&d), None => 0 };
+        check!("HOLD-GATE: NOTCH held, not spent (balance unchanged)", held == MIN_NOTCH);
+    }
+
     // --- 1) Initialize (main mint: creator plays payer + both fee roles) ----
-    match send(rpc, &[curve::initialize(&program, &creator.pubkey(), &creator.pubkey(), &creator.pubkey(), &mint, &CFG)], &creator, &[&creator]).await {
+    match send(rpc, &[curve::initialize(&program, &creator.pubkey(), &creator.pubkey(), &creator.pubkey(), &mint, &notch_ta, &CFG)], &creator, &[&creator]).await {
         Ok(_) => {
             let c = ctx.curve().await;
             check!("Initialize creates curve PDA", c.is_some());
@@ -235,7 +294,7 @@ async fn main() {
     }
 
     // --- 2) Re-initialize rejected ------------------------------------------
-    let reinit = send(rpc, &[curve::initialize(&program, &creator.pubkey(), &creator.pubkey(), &creator.pubkey(), &mint, &CFG)], &creator, &[&creator]).await;
+    let reinit = send(rpc, &[curve::initialize(&program, &creator.pubkey(), &creator.pubkey(), &creator.pubkey(), &mint, &notch_ta, &CFG)], &creator, &[&creator]).await;
     check!("re-Initialize rejected", reinit.is_err());
 
     // --- 2b) PLATFORM RULE: backing must be 82.5%+, governor is mandatory ----
@@ -250,7 +309,7 @@ async fn main() {
         send(rpc, &curve::create_mint_ixs(&program, &payer.pubkey(), &m, mint_rent), &payer, &[&payer, &mk]).await.expect("mint");
         let mut cfg = CFG;
         cfg.min_backing_bps = bps;
-        let r = send(rpc, &[curve::initialize(&program, &creator.pubkey(), &creator.pubkey(), &creator.pubkey(), &m, &cfg)], &creator, &[&creator]).await;
+        let r = send(rpc, &[curve::initialize(&program, &creator.pubkey(), &creator.pubkey(), &creator.pubkey(), &m, &notch_ta, &cfg)], &creator, &[&creator]).await;
         check!(name, r.is_ok() == ok);
     }
 
@@ -262,7 +321,7 @@ async fn main() {
         let mk = Keypair::new();
         let m2 = mk.pubkey();
         send(rpc, &curve::create_mint_ixs(&program, &payer.pubkey(), &m2, mint_rent), &payer, &[&payer, &mk]).await.expect("split mint");
-        send(rpc, &[curve::initialize(&program, &creator.pubkey(), &bc.pubkey(), &sc.pubkey(), &m2, &CFG)], &creator, &[&creator]).await.expect("split init");
+        send(rpc, &[curve::initialize(&program, &creator.pubkey(), &bc.pubkey(), &sc.pubkey(), &m2, &notch_ta, &CFG)], &creator, &[&creator]).await.expect("split init");
         send(rpc, &[curve::create_ata_ix(&sniper.pubkey(), &sniper.pubkey(), &m2)], sniper, &[sniper]).await.expect("split ata");
         // buy: 1% must land on the hardcoded PLATFORM wallet, regardless of the
         // buy_creator (bc) passed at init; sell_creator (sc) gets nothing on a buy.

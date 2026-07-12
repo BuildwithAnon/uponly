@@ -27,6 +27,8 @@
 //!     The creator only ever receives flow fees. Non-custodial by construction.
 //!   * One deployment serves many launches: curve PDA seeds = ["curve", mint];
 //!     the mint's authority must be the curve PDA (verified at Initialize).
+//!   * Creation runs through $NOTCH: Initialize requires the payer to hold
+//!     MIN_LAUNCH_NOTCH of the flagship mint. Checked, never debited.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::{
@@ -119,6 +121,21 @@ pub const MAX_PRICE_FP: u128 = 1_000_000_000_000_000_000_000_000_000_000; // 1e3
 pub const PLATFORM_BUY_FEE_WALLET: Pubkey =
     solana_program::pubkey!("Bj6kYwqS7Le5SkwYepMTDUpDZNgmYTfXW9FPAvRq7vsY");
 
+/// Token creation runs through $NOTCH: Initialize requires the payer to HOLD
+/// at least this many base units of the flagship NOTCH mint (0.1 NOTCH at
+/// 9 decimals). The balance is only checked, never debited — launching needs
+/// a NOTCH holder, it does not cost NOTCH.
+pub const MIN_LAUNCH_NOTCH: u64 = 100_000_000;
+/// The flagship NOTCH mint the launch hold-gate checks.
+#[cfg(not(feature = "dev-mint"))]
+pub const NOTCH_MINT: Pubkey =
+    solana_program::pubkey!("LT4z98vU6bLXhfrSH4wXgUq98gocjWfoxYw85fNotCH");
+/// Local-validator stand-in (keypair committed at client/dev-notch-mint.json);
+/// never part of a release build.
+#[cfg(feature = "dev-mint")]
+pub const NOTCH_MINT: Pubkey =
+    solana_program::pubkey!("GeorkYJqyPgDmSPbnXaFg72bdANs58mXQ5J23KpR55vs");
+
 // Custom errors.
 const E_BAD_PARAMS: u32 = 1;
 const E_BAD_PDA: u32 = 2;
@@ -132,6 +149,7 @@ const E_ALREADY_INIT: u32 = 9;
 const E_ZERO_AMOUNT: u32 = 10;
 const E_BAD_TOKEN_ACCOUNT: u32 = 11;
 const E_CURVE_SATURATED: u32 = 12;
+const E_NEED_NOTCH: u32 = 13;
 
 fn err(code: u32) -> ProgramError {
     ProgramError::Custom(code)
@@ -236,8 +254,11 @@ pub enum CurveInstruction {
     /// mint_authority == curve PDA, freeze_authority == None. `buy_creator`
     /// and `sell_creator` are the fee-recipient addresses (may differ, may be
     /// the payer); they are recorded, not signed, at init.
+    /// The payer must hold >= MIN_LAUNCH_NOTCH of the flagship NOTCH mint in
+    /// `payer_notch_ta` (a token account they own); the balance is checked,
+    /// never moved.
     /// Accounts: [payer (signer, writable), curve PDA (writable),
-    ///            mint, system_program]
+    ///            mint, payer_notch_ta, system_program]
     Initialize {
         buy_creator: Pubkey,
         sell_creator: Pubkey,
@@ -444,6 +465,7 @@ fn initialize(
     let payer_ai = next_account_info(ai)?;
     let curve_ai = next_account_info(ai)?;
     let mint_ai = next_account_info(ai)?;
+    let notch_ta_ai = next_account_info(ai)?;
     let system_ai = next_account_info(ai)?;
 
     if !payer_ai.is_signer {
@@ -451,6 +473,25 @@ fn initialize(
     }
     if *system_ai.key != system_program::ID {
         return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // Hold-gate: token creation runs through $NOTCH. The payer must hold at
+    // least MIN_LAUNCH_NOTCH of the flagship mint in a token account they own
+    // (any token account, not just the ATA). Read-only — nothing is debited.
+    if *notch_ta_ai.owner != TOKEN_PROGRAM {
+        return Err(err(E_NEED_NOTCH));
+    }
+    {
+        let d = notch_ta_ai.data.borrow();
+        if d.len() < 72 {
+            return Err(err(E_NEED_NOTCH));
+        }
+        let ta_mint = Pubkey::new_from_array(d[0..32].try_into().unwrap());
+        let ta_owner = Pubkey::new_from_array(d[32..64].try_into().unwrap());
+        let amount = u64::from_le_bytes(d[64..72].try_into().unwrap());
+        if ta_mint != NOTCH_MINT || ta_owner != *payer_ai.key || amount < MIN_LAUNCH_NOTCH {
+            return Err(err(E_NEED_NOTCH));
+        }
     }
     if !(MIN_START_PRICE_FP..=MAX_PRICE_FP).contains(&start_price_fp)
         || !(MIN_DOUBLE_VOL..=MAX_DOUBLE_VOL).contains(&double_vol)

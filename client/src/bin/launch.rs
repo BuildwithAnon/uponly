@@ -61,6 +61,13 @@ async fn main() {
         Err(_) => payer.pubkey(),
     };
 
+    // Launch hold-gate: the payer must hold >= 0.1 $NOTCH (checked on-chain,
+    // never debited). NOTCH_MINT overridable for local-validator testing.
+    let notch_mint = Pubkey::from_str(
+        &std::env::var("NOTCH_MINT").unwrap_or_else(|_| "LT4z98vU6bLXhfrSH4wXgUq98gocjWfoxYw85fNotCH".into()),
+    ).expect("NOTCH_MINT pubkey");
+    let notch_ta = curve::ata(&payer.pubkey(), &notch_mint);
+
     let cfg = LaunchCfg {
         start_price_fp: env_u128("START_PRICE_FP", 1_000_000_000_000_000_000),
         double_vol: env_u64("DOUBLE_VOL_SOL", 25) * SOL,
@@ -81,6 +88,7 @@ async fn main() {
     println!("  sell_creator: {}  (gets 1% of sells)", sell_creator);
     println!("  mint        : {}", mint);
     println!("  curvePDA    : {}", curve_pda);
+    println!("  hold-gate   : payer must hold >= 0.1 NOTCH in {}", notch_ta);
     println!(
         "  config      : start={} 2x_per={} SOL buy=3%(1%cr+2%fl) sell=6%(1%cr+5%fl) backing>={}bps (main token ~15%; platform floor 82.5%/25%)",
         cfg.start_price_fp, cfg.double_vol / SOL, cfg.min_backing_bps
@@ -88,7 +96,7 @@ async fn main() {
 
     // ONE atomic transaction: create+init mint (authority = curve PDA), then Initialize.
     let mut ixs = curve::create_mint_ixs(&program, &payer.pubkey(), &mint, mint_rent);
-    ixs.push(curve::initialize(&program, &payer.pubkey(), &buy_creator, &sell_creator, &mint, &cfg));
+    ixs.push(curve::initialize(&program, &payer.pubkey(), &buy_creator, &sell_creator, &mint, &notch_ta, &cfg));
     println!("  tx      : {} instructions (create_account, InitializeMint2, Initialize) in ONE tx", ixs.len());
 
     if std::env::var("DRY").is_ok() {

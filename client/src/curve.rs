@@ -82,12 +82,15 @@ pub fn ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
 // Program instructions
 // ---------------------------------------------------------------------------
 
+/// `notch_ta` = a token account of the flagship NOTCH mint owned by `payer`,
+/// holding >= MIN_LAUNCH_NOTCH (the launch hold-gate; checked, never debited).
 pub fn initialize(
     program_id: &Pubkey,
     payer: &Pubkey,
     buy_creator: &Pubkey,
     sell_creator: &Pubkey,
     mint: &Pubkey,
+    notch_ta: &Pubkey,
     cfg: &LaunchCfg,
 ) -> Instruction {
     let (pda, _) = curve_pda(program_id, mint);
@@ -97,6 +100,7 @@ pub fn initialize(
             AccountMeta::new(*payer, true),
             AccountMeta::new(pda, false),
             AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new_readonly(*notch_ta, false),
             AccountMeta::new_readonly(system_program::ID, false),
         ],
         data: borsh::to_vec(&CurveInstruction::Initialize {
@@ -215,6 +219,46 @@ pub fn create_mint_ixs(
             data,
         },
     ]
+}
+
+/// create_account + InitializeMint2 with an EXPLICIT mint authority (a plain
+/// SPL mint, e.g. the local-test NOTCH stand-in; curve mints use
+/// create_mint_ixs, whose authority is the curve PDA).
+pub fn create_plain_mint_ixs(
+    payer: &Pubkey,
+    mint: &Pubkey,
+    authority: &Pubkey,
+    mint_rent: u64,
+) -> Vec<Instruction> {
+    let mut data = Vec::with_capacity(35);
+    data.push(20u8); // InitializeMint2
+    data.push(9u8); // decimals
+    data.extend_from_slice(authority.as_ref());
+    data.push(0u8); // freeze_authority = None
+    vec![
+        system_instruction::create_account(payer, mint, mint_rent, MINT_SIZE as u64, &token_program()),
+        Instruction {
+            program_id: token_program(),
+            accounts: vec![AccountMeta::new(*mint, false)],
+            data,
+        },
+    ]
+}
+
+/// SPL MintTo (the mint authority signs).
+pub fn mint_to_ix(mint: &Pubkey, dest: &Pubkey, authority: &Pubkey, amount: u64) -> Instruction {
+    let mut data = Vec::with_capacity(9);
+    data.push(7u8); // MintTo
+    data.extend_from_slice(&amount.to_le_bytes());
+    Instruction {
+        program_id: token_program(),
+        accounts: vec![
+            AccountMeta::new(*mint, false),
+            AccountMeta::new(*dest, false),
+            AccountMeta::new_readonly(*authority, true),
+        ],
+        data,
+    }
 }
 
 /// Associated token account CreateIdempotent.
